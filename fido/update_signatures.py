@@ -58,7 +58,7 @@ def main():
     numberPuids = len(puids)
     print "Found "+str(numberPuids)+" PRONOM PUID's"
     print "Downloading signatures can take a while"
-    answers = {'y','yes'}
+    answers = ('y','yes')
     ask = raw_input("Continue and download signatures? (yes/no): ")
     if ask.lower() not in answers:
         print "Aborting update..."
