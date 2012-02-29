@@ -39,7 +39,7 @@ def main():
     signatureFile = os.path.join(os.path.abspath(defaults['conf_dir']), defaults['signatureFileName'].format(currentVersion))
     if os.path.isfile(signatureFile):
         print "You already have the latest PRONOM signature file, version "+str(currentVersion)
-        answers = {'y','yes'}
+        answers = ('y','yes')
         ask = raw_input("Update anyway? (yes/no): ")
         if ask.lower() not in answers:
             sys.exit()
