@@ -1,18 +1,21 @@
-#!python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import sys, re, os, time, math
 import hashlib, urllib, urlparse, csv, getopt
 from xml.etree import cElementTree as ET
 from xml.etree import ElementTree as CET
+from xml.etree import ElementTree as VET # versions.xml
 
-version = '1.0.0'
+version = '1.3.0'
 defaults = {'bufsize': 128 * 1024, # (bytes)
-            'regexcachesize' : 2084, # (bytes)
+            'regexcachesize' :2084, # (bytes)
             'conf_dir' : os.path.join(os.path.dirname(__file__), 'conf'),
             'printmatch': "OK,%(info.time)s,%(info.puid)s,\"%(info.formatname)s\",\"%(info.signaturename)s\",%(info.filesize)s,\"%(info.filename)s\",\"%(info.mimetype)s\",\"%(info.matchtype)s\"\n",
             'printnomatch' : "KO,%(info.time)s,,,,%(info.filesize)s,\"%(info.filename)s\",,\"%(info.matchtype)s\"\n",
-            'format_files': ['formats.xml', 'format_extensions.xml'],
-            'containersignature_file' : 'container-signature-20110204.xml',
+            'containersignature_file' : 'container-signature-20130501.xml',
+            # versions.xml is where fido.py reads version information
+            # about which xml to load
+            'versions_file' : 'versions.xml',
             'container_bufsize' : 512 * 1024, # (bytes)
             'description' : """
     Format Identification for Digital Objects (fido).
@@ -22,17 +25,17 @@ defaults = {'bufsize': 128 * 1024, # (bytes)
     'epilog' : """
     Open Planets Foundation (http://www.openplanetsfoundation.org)
     See License.txt for license information.
-    Download from: http://github.com/openplanets/fido/downloads\n
-    Author: Adam Farquhar, 2010
-    Maintainer: Maurice de Rooij (OPF/NANETH), 2011, 2012
-    FIDO uses the UK National Archives (TNA) PRONOM File Format and Container descriptions.
-    PRONOM is available from http://www.nationalarchives.gov.uk/pronom/.
-    """
+    Download from: https://github.com/openplanets/fido/releases
+    Usage guide: http://wiki.opf-labs.org/display/TR/FIDO+usage+guide
+    Author: Adam Farquhar (BL), 2010
+    Maintainer: Maurice de Rooij (OPF/NANETH), 2011, 2012, 2013
+    FIDO uses the UK National Archives (TNA) PRONOM File Format
+    and Container descriptions.
+    PRONOM is available from http://www.nationalarchives.gov.uk/pronom/"""
 }
 
 class Fido:
-    def __init__(self, quiet=False, bufsize=None, container_bufsize = None, printnomatch=None, printmatch=None,
-                 zip=False, nocontainer=False, handle_matches=None, conf_dir=None, format_files=None, containersignature_file=None):
+    def __init__(self, quiet=False, bufsize=None, container_bufsize = None, printnomatch=None, printmatch=None, zip=False, nocontainer=False, handle_matches=None, conf_dir=None, format_files=None, containersignature_file=None):
         global defaults
         self.quiet = quiet
         self.bufsize = (defaults['bufsize'] if bufsize == None else bufsize)
@@ -43,13 +46,17 @@ class Fido:
         self.zip = zip
         self.nocontainer = (defaults['nocontainer'] if nocontainer == None else nocontainer)
         self.conf_dir = defaults['conf_dir'] if conf_dir == None else conf_dir
+#        print defaults
+#        sys.exit()
         self.format_files = defaults['format_files'] if format_files == None else format_files
-        self.containersignature_file = defaults['containersignature_file'] if containersignature_file == None else containersignature_file
+        #self.containersignature_file = defaults['containersignature_file'] if containersignature_file == None else containersignature_file
+        self.containersignature_file = defaults['containersignature_file'] #if containersignature_file == None else containersignature_file
         self.formats = []
         self.puid_format_map = {}
         self.puid_has_priority_over_map = {}
-        for file in self.format_files:
-            self.load_fido_xml(os.path.join(os.path.abspath(self.conf_dir), file))
+        # load signatures
+        for xml_file in self.format_files:
+            self.load_fido_xml(os.path.join(os.path.abspath(self.conf_dir), xml_file))
         self.load_container_signature(os.path.join(os.path.abspath(self.conf_dir), self.containersignature_file))
         self.current_file = ''
         self.current_filesize = 0
@@ -164,7 +171,13 @@ class Fido:
         self.puidMapping = {}
         mappings = tree.find('FileFormatMappings')
         for mapping in mappings.findall('FileFormatMapping'):
-            self.puidMapping[mapping.get('signatureId')] = mapping.get('Puid')
+            if mapping.get('signatureId') not in self.puidMapping:
+                self.puidMapping[mapping.get('signatureId')] = []
+            self.puidMapping[mapping.get('signatureId')].append(mapping.get('Puid'))
+#        print "sequences:\n",self.sequenceSignature
+#        print "trigger:\n",self.puidTriggers
+#        print "mapping:\n",self.puidMapping
+#        exit()
 
     def load_fido_xml(self, file):
         """Load the fido format information from @param file.
@@ -299,7 +312,7 @@ class Fido:
             self.walk_zip(filename, fileobj)
         elif type == 'tar':
             self.walk_tar(filename, fileobj)
-        else:
+        else: # TODO: ouch!
             raise RuntimeError("Unknown container type: " + repr(type))
                 
     def identify_multi_object_stream(self, stream):
@@ -331,8 +344,11 @@ class Fido:
             # MdR: this needs attention
             if len(matches) > 0:
                 self.handle_matches(self.current_file, matches, time.clock() - t0, "signature")
+            elif len(matches) == 0 or self.current_filesize == 0:
+                matches = self.match_extensions(self.current_file)
+                self.handle_matches(self.current_file, matches, time.clock() - t0, "extension")
                 
-    def identify_stream(self, stream):
+    def identify_stream(self, stream, filename):
         """Identify the type of @param stream.  
            Call self.handle_matches instead of returning a value.
            Does not close stream.
@@ -345,6 +361,25 @@ class Fido:
         # MdR: this needs attention
         if len(matches) > 0:
             self.handle_matches(self.current_file, matches, time.clock() - t0, "signature")
+        elif len(matches) == 0 or self.current_filesize == 0:
+            # we can only determine the filename from the STDIN stream
+            # on Linux, on Windows there is not a (simple) way to do that
+            if (os.name != "nt"):
+                try:
+                    self.current_file = os.readlink("/proc/self/fd/0")
+                except:
+                    if filename is not None:
+                        self.current_file = filename
+                    else:
+                        self.current_file = 'STDIN'
+            else:
+                if filename is not None:
+                    self.current_file = filename
+            matches = self.match_extensions(self.current_file)
+            # we have to reset self.current_file if not on Windows
+            if (os.name != "nt"):
+                self.current_file = 'STDIN'
+            self.handle_matches(self.current_file, matches, time.clock() - t0, "extension")
                     
     def container_type(self, matches):
         """Determine if one of the @param matches is the format of a container that we can look inside of (e.g., zip, tar).
@@ -534,6 +569,9 @@ class Fido:
            cutting off patterns we are looking for in the middle.
            This method is somewhat slower than reading the complete file at once.
            This is to prevent Fido to potentially crash in the midst of scanning a very big file.
+           NOTE (MdR): this piece of code is still a bit quirky
+           as it does not yet takes byte positions into account which
+           are available in the DROID container signature file
         """
         container_result = []
         nobuffer = False
@@ -542,38 +580,62 @@ class Fido:
         container_hit = False
         passes = 1
         container_buffer = ""
+        # TODO: find better way to handle zip contents
+        # for now: ugly hack, but working
+        # this slows down because the zip is re-opened on each item
+        # if "!" is in filename, it is a zip item
+#        if "!" in self.current_file:
+#            import zipfile, tempfile
+#            zip, item = self.current_file.split("!")
+#            zipitem = tempfile.SpooledTemporaryFile(prefix='Fido')
+            #with zipstream.open(item) as source:
+#            try:
+#                source = zipstream.open(item)
+#                self.copy_stream(source, target)
+#                target.seek(0)
+#                self.identify_contents(item_name, target, self.container_type(matches))
+#            finally:
+#                source.close()
+        #exit()
         # in case argument 'nocontainer' is set
         # read default bofbuffer
-        if self.nocontainer or self.current_filesize <= self.bufsize:
+        if self.nocontainer or self.current_filesize <= self.bufsize or self.current_file == "STDIN":
             passes = 1
             nobuffer = True
         else:
             passes = int(float(self.current_filesize / self.container_bufsize) + 1)
         pos = 0
-        overlap_pos = 0
         for i in xrange(passes):
-            if nobuffer:
+            if nobuffer is True:
                 container_buffer = parent_buffer
             else:
                 if i == 0:
                     pos = 0
                 else:
                     pos = ((self.container_bufsize * i) - self.overlap_range)
-                    #print i, pos, (self.container_bufsize * i)
                     overlap = True
                 container_buffer = self.buffered_read(pos, overlap)
             for (container_id,container_regexes) in self.sequenceSignature.iteritems():
+                # set hitcounter in case a container entry
+                # has more than one regex
+                hitcounter = 0
                 if len(container_regexes) > 0:
                     for container_regex in container_regexes:
                         if re.search(container_regex, container_buffer):
+                            hitcounter += 1
+                            # if the hitcounter matches the number of regexes
+                            # then it must be a positive hit, else continue
+                            # to match the rest of the sequences
+                            if hitcounter < len(container_regexes):
+                                continue
                             self.matchtype = "container"
-                            container_puid = self.puidMapping[container_id]
-                            for container_format in self.formats:
-                                if container_format.find('puid').text == container_puid:
-                                    if self.as_good_as_any(container_format, parent_result):
-                                        for container_sig in self.get_signatures(container_format):
-                                            container_result.append((container_format, container_sig))
-                                        break
+                            for container_puid in self.puidMapping[container_id]:
+                                for container_format in self.formats:
+                                    if container_format.find('puid').text == container_puid:
+                                        if self.as_good_as_any(container_format, parent_result):
+                                            for container_sig in self.get_signatures(container_format):
+                                                container_result.append((container_format, container_sig))
+                                            break
         return container_result
 
     def match_formats(self, bofbuffer, eofbuffer):
@@ -625,16 +687,16 @@ class Fido:
                                         result.append((k,v))
                             break
         except Exception,e:
-            print e
-            #print "Unexpected error:", sys.exc_info()[0], e
+            sys.stderr.write(str(e)+"\n")
             # TODO: MdR: needs some <3
+            #print "Unexpected error:", sys.exc_info()[0], e
             #sys.stdout.write('***', self.get_puid(format), regex)
             
         #        t1 = time.clock()
         #        if t1 - t0 > 0.02:
         #            print >> sys.stderr, "FIDO: Slow ID", self.current_file
         result = [match for match in result if self.as_good_as_any(match[0], result)]
-        result = list(set(result)) # remove duplicate results, this is a due to a minor bug in self.read_container(), needs fix
+        result = list(set(result)) # remove duplicate results, this is due to ??? in self.read_container(), needs fix
         return result
     
     def match_extensions(self, filename):
@@ -642,9 +704,12 @@ class Fido:
         myext = os.path.splitext(filename)[1].lower().lstrip(".")
         result = []
         if len(myext) > 0:
-            for format in self.formats:
-                if format.find('extension') != None and myext == format.find('extension').text:
-                    result.append((format, self.externalsig))
+            for element in self.formats:
+                if element.findall('extension') != None:
+                    for format in element.findall('extension'):
+                        if myext == format.text:
+                            result.append((element, self.externalsig))
+                            break
         result = [match for match in result if self.as_good_as_any(match[0], result)]
         return result
     
@@ -672,20 +737,22 @@ def list_files(roots, recurse=False):
 def main(arglist=None):
     # The argparse package was introduced in 2.7
     t0 = time.clock() 
-    from argparselocal import ArgumentParser
+    from argparselocal import ArgumentParser, RawTextHelpFormatter    
     if arglist == None:
         arglist = sys.argv[1:]
     if len(arglist) == False:
         arglist.append("-h")        
-    parser = ArgumentParser(description=defaults['description'], epilog=defaults['epilog'], fromfile_prefix_chars='@')
+    parser = ArgumentParser(description=defaults['description'], epilog=defaults['epilog'], fromfile_prefix_chars='@', formatter_class=RawTextHelpFormatter)
     parser.add_argument('-v', default=False, action='store_true', help='show version information')
     parser.add_argument('-q', default=False, action='store_true', help='run (more) quietly')
     parser.add_argument('-recurse', default=False, action='store_true', help='recurse into subdirectories')
     parser.add_argument('-zip', default=False, action='store_true', help='recurse into zip and tar files')
     parser.add_argument('-nocontainer', default=False, action='store_true', help='disable deep scan of container documents, increases speed but may reduce accuracy with big files')
+    parser.add_argument('-pronom_only', default=False, action='store_true', help='disables loading of format extensions file, only PRONOM signatures are loaded, may reduce accuracy of results')
     group = parser.add_mutually_exclusive_group()
     group.add_argument('-input', default=False, help='file containing a list of files to check, one per line. - means stdin')
-    group.add_argument('files', nargs='*', default=[], metavar='FILE', help='files to check.  If the file is -, then read content from stdin. In this case, python must be invoked with -u or it may convert the line terminators.')
+    group.add_argument('files', nargs='*', default=[], metavar='FILE', help='files to check. If the file is -, then read content from stdin. In this case, python must be invoked with -u or it may convert the line terminators.')
+    parser.add_argument('-filename', default=None, help='filename if file contents passed through STDIN')
     parser.add_argument('-useformats', metavar='INCLUDEPUIDS', default=None, help='comma separated string of formats to use in identification')
     parser.add_argument('-nouseformats', metavar='EXCLUDEPUIDS', default=None, help='comma separated string of formats not to use in identification')
     parser.add_argument('-matchprintf', metavar='FORMATSTRING', default=None, help='format string (Python style) to use on match. See nomatchprintf, README.txt.')
@@ -695,20 +762,46 @@ def main(arglist=None):
     
     parser.add_argument('-loadformats', default=None, metavar='XML1,...,XMLn', help='comma separated string of XML format files to add.')
     parser.add_argument('-confdir', default=None, help='configuration directory to load_fido_xml, for example, the format specifications from.')
-       
-    mydir = os.path.abspath(os.path.dirname(__file__))
-        
+    
+    # what is this doing here only once?   
+    #mydir = os.path.abspath(os.path.dirname(__file__))
+
     # PROCESS ARGUMENTS
     args = parser.parse_args(arglist)
+#    print args
+#    sys.exit()
+    # process confdir
+    # load versions.xml
+    # and stick it in defaults
+    if args.confdir:
+        versionsFile = os.path.join(os.path.abspath(args.confdir), defaults['versions_file'])
+    else:
+        versionsFile = os.path.join(os.path.abspath(defaults['conf_dir']), defaults['versions_file'])
+    try:
+        versions = VET.parse(versionsFile)
+    except Exception, e:
+        sys.stderr.write("An error occured loading versions.xml:\n{0}".format(e))
+        sys.exit()
+    defaults['xml_pronomSignature'] = versions.find("pronomSignature").text
+#    defaults['xml_pronomContainerSignature'] = versions.find("pronomContainerSignature").text
+    defaults['containersignature_file'] = versions.find("pronomContainerSignature").text
+    defaults['xml_fidoExtensionSignature'] = versions.find("fidoExtensionSignature").text
+    defaults['format_files'] = []
+    defaults['format_files'].append(defaults['xml_pronomSignature'])
+    if args.pronom_only:
+        versionHeader = "FIDO v{0} ({1}, {2})\n".format(version,defaults['xml_pronomSignature'],defaults['containersignature_file'])
+    else:
+        versionHeader = "FIDO v{0} ({1}, {2}, {3})\n".format(version,defaults['xml_pronomSignature'],defaults['containersignature_file'],defaults['xml_fidoExtensionSignature'])
+        defaults['format_files'].append(defaults['xml_fidoExtensionSignature'])
     
     if args.v :
-        sys.stdout.write("fido/" + version + "\n")
+        sys.stdout.write(versionHeader)
         sys.exit(0)
     if args.matchprintf != None:
         args.matchprintf = args.matchprintf.decode('string_escape')
     if args.nomatchprintf != None:
         args.nomatchprintf = args.nomatchprintf.decode('string_escape')
-    fido = Fido(quiet=args.q, bufsize=args.bufsize, 
+    fido = Fido(quiet=args.q, bufsize=args.bufsize, container_bufsize=args.container_bufsize,
                 printmatch=args.matchprintf, printnomatch=args.nomatchprintf, zip=args.zip, nocontainer = args.nocontainer, conf_dir=args.confdir)
     
     #TODO: Allow conf options to be dis-included
@@ -732,20 +825,22 @@ def main(arglist=None):
     
     # RUN
     try:
+        if not args.q:
+            sys.stderr.write(versionHeader)
+            sys.stderr.flush()
         if (not args.input) and len(args.files) == 1 and args.files[0] == '-':
             if fido.zip == True:
                 raise RuntimeError("Multiple content read from stdin not yet supported.")
                 sys.exit(1)
                 fido.identify_multi_object_stream(sys.stdin)
             else:
-                fido.identify_stream(sys.stdin)
+                fido.identify_stream(sys.stdin, args.filename)
         else:
             for file in list_files(args.files, args.recurse):
                 fido.identify_file(file)
     except KeyboardInterrupt:
-        # MdR: this seems to be broken?
-        msg = "FIDO: Interrupt during:\n  File: {0}\n  Format: Puid={1.Identifier} [{1.FormatName}]\n  Sig: ID={2.SignatureID} [{2.SignatureName}]\n  Pat={3.ByteSequenceID} {3.regexstring!r}"
-        sys.stderr.write(msg.format(fido.current_file, fido.current_format, fido.current_sig, fido.current_pat))
+        msg = "FIDO: Interrupt while identifying file {0}"
+        sys.stderr.write(msg.format(fido.current_file))
         sys.exit(1)
         
     if not args.q:
@@ -755,4 +850,3 @@ def main(arglist=None):
 
 if __name__ == '__main__':
     main()
-
